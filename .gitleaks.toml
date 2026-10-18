@@ -1,0 +1,7 @@
+# nuvek-auth holds no secrets: it reads env var NAMES and validates tokens it is handed.
+# gitleaks runs the default ruleset with no allowlist — any finding is a real regression and must block.
+# Test fixtures generate their keypairs at runtime; never commit a key to make a test pass.
+title = "nuvek-auth gitleaks"
+
+[extend]
+useDefault = true

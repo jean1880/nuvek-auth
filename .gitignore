@@ -1,0 +1,34 @@
+/target
+Cargo.lock
+*.log
+.DS_Store
+
+# Local AI-assistant context. Deployment-specific notes must not be published.
+AGENTS.md
+CLAUDE.md
+.claude/
+
+# Scratch diffs from refactors — never an artifact worth tracking.
+*.patch
+
+# OS / editor cruft and local env files
+._*
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# npm package build
+node_modules/
+dist/

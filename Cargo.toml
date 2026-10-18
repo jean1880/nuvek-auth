@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/nuvek-auth"]
+resolver = "2"

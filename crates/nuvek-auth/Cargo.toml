@@ -1,0 +1,38 @@
+[package]
+name = "nuvek-auth"
+version = "0.1.0"
+edition = "2021"
+# Own code needs 1.82 (Option::is_none_or); the current locked dependency set needs 1.88.
+rust-version = "1.88"
+description = "Shared authentication for nuvek axum services: Auth0 RS256 access tokens, a static machine token, single-use stream tickets and a strict SPA CSP. Secret-free by construction."
+license = "MIT"
+repository = "https://github.com/jean1880/nuvek-auth"
+readme = "../../README.md"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["json"] }
+tower = { version = "0.5", default-features = false }
+tokio = { version = "1", features = ["sync", "time"] }
+jsonwebtoken = { version = "9.3", default-features = false }
+# TLS: rustls on ring (already pulled in by jsonwebtoken) with the Mozilla webpki roots baked in.
+# `rustls-no-provider` keeps aws-lc-rs (and its cmake build) out of the tree. reqwest 0.13 still
+# compiles rustls-platform-verifier through that feature, but it is unused: the client gets a
+# preconfigured rustls ClientConfig with webpki roots, so no system CA bundle is needed.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+ring = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+subtle = "2.6"
+base64 = "0.22"
+getrandom = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "test-util"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+rsa = { version = "0.9", features = ["getrandom"] }
+http-body-util = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
