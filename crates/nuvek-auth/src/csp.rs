@@ -6,17 +6,25 @@ pub const FILE_SANDBOX: &str = "sandbox; default-src 'none'";
 /// Builds the strict SPA-shell CSP: `script-src 'self'` with no `unsafe-eval`, and the issuer
 /// origin allowed only in `connect-src` (token endpoint) and `frame-src` (silent auth).
 ///
+/// With an issuer, `worker-src` also allows `blob:`: auth0-spa-js runs the refresh-token
+/// exchange in a worker built from a blob URL when tokens are cached in memory. Without it the
+/// worker falls back to `script-src 'self'`, is blocked, and the redirect callback never settles.
+///
 /// `issuer` is reduced to its `https://host[:port]` origin. `None`, or a value that is not a
-/// plain `https://` URL, leaves the issuer out (`frame-src 'none'`).
+/// plain `https://` URL, leaves the issuer out (`frame-src 'none'`, no `worker-src`).
 pub fn spa_policy(issuer: Option<&str>) -> String {
     let origin = issuer.and_then(issuer_origin);
-    let (connect, frame) = match &origin {
-        Some(o) => (format!("'self' {o}"), o.clone()),
-        None => ("'self'".to_string(), "'none'".to_string()),
+    let (connect, frame, worker) = match &origin {
+        Some(o) => (
+            format!("'self' {o}"),
+            o.clone(),
+            " worker-src 'self' blob:;",
+        ),
+        None => ("'self'".to_string(), "'none'".to_string(), ""),
     };
     format!(
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data:; connect-src {connect}; frame-src {frame}; \
+         img-src 'self' data:; connect-src {connect}; frame-src {frame};{worker} \
          object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
     )
 }

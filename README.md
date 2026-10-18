@@ -32,7 +32,9 @@ Handlers read the caller with the `Principal` extractor. Every successful `requi
 audit event on the `nuvek_auth::audit` tracing target (`actor`, `via`, `method`, `path`).
 
 `nuvek_auth::csp::spa_policy(issuer)` returns a strict CSP for the SPA shell (`script-src 'self'`, no
-`unsafe-eval`); `nuvek_auth::csp::FILE_SANDBOX` is for user-visible files such as logs.
+`unsafe-eval`); `nuvek_auth::csp::FILE_SANDBOX` is for user-visible files such as logs. With an issuer
+it adds `worker-src 'self' blob:`, which auth0-spa-js needs for its in-memory refresh-token worker; an
+app that writes its own CSP must include it, or sign-in hangs after the Auth0 redirect.
 
 ### Environment
 

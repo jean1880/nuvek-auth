@@ -210,12 +210,14 @@ fn spa_policy_with_and_without_issuer() {
         csp::spa_policy(Some("https://tenant.test.example/")),
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data:; connect-src 'self' https://tenant.test.example; \
-         frame-src https://tenant.test.example; object-src 'none'; base-uri 'none'; \
-         frame-ancestors 'self'"
+         frame-src https://tenant.test.example; worker-src 'self' blob:; object-src 'none'; \
+         base-uri 'none'; frame-ancestors 'self'"
     );
     let none = csp::spa_policy(None);
     assert!(none.contains("connect-src 'self';"));
     assert!(none.contains("frame-src 'none'"));
+    assert!(!none.contains("worker-src"));
+    assert!(!none.contains("blob:"));
     assert!(!none.contains("unsafe-eval"));
     // Injection attempts are dropped, not passed through.
     let evil = csp::spa_policy(Some("https://x.example; script-src *"));
