@@ -13,7 +13,7 @@ with Auth0 Authorization Code + PKCE.
 
 ```toml
 [dependencies]
-nuvek-auth = { git = "https://github.com/jean1880/nuvek-auth.git", tag = "v0.1.0" }
+nuvek-auth = { git = "https://github.com/jean1880/nuvek-auth.git", tag = "v0.2.0" }
 ```
 
 ```rust
@@ -47,6 +47,7 @@ audit event on the `nuvek_auth::audit` tracing target (`actor`, `via`, `method`,
 | `{P}ALLOWED_SUBS` | oidc modes, this or the next | Comma-separated Auth0 user IDs allowed in |
 | `{P}REQUIRED_PERMISSION` | oidc modes, this or the previous | Permission every user token must carry |
 | `{P}REQUIRE_MFA` | no (false) | Require `mfa` in `amr` or `https://nuvek.ca/amr` for permissioned routes |
+| `{P}REQUIRE_PASSKEY` | no (false) | Require exact `passkey` in signed `https://nuvek.ca/amr` for every OIDC authentication, including protected reads |
 | `{P}API_TOKEN` | token modes | Static machine token (`sub = machine:static`). Empty counts as unset |
 | `{P}API_TOKEN_NEXT` | no | Second accepted token, for rotation |
 | `{P}AUTH_READS` | no (true) | Gate read routes behind login |
@@ -59,8 +60,26 @@ with 401, 403, 503 and 429 respectively. The static token never depends on Auth0
 break-glass path when the tenant is unreachable.
 
 ### Auth0 tenant requirements
-- The API must have RBAC enabled with **Add Permissions in the Access Token**. Permissions are read only
-  from the `permissions` claim, never from `scope`: with RBAC off, Auth0 grants any requested scope.
+- Permissions come from signed `https://nuvek.ca/permissions` when present. This claim is authoritative,
+  including an empty array; native RBAC cannot restore permissions withheld by the Action. When the
+  namespace is absent, the native `permissions` claim remains supported with API RBAC and **Add
+  Permissions in the Access Token**. Either claim must be an array of strings; malformed namespaces,
+  including explicit null, fail closed. Empty permissions and `*` are discarded, and the selected
+  list is deduplicated. `scope` never grants permissions: without RBAC, requested scopes can be
+  self-grantable.
+- For a Free-plan deployment, an administrator controls `app_metadata` permissions and a trusted
+  post-login Action issues `https://nuvek.ca/permissions` only after actual passkey authentication.
+  Use the completed authentication methods for that transaction; an enrolled passkey or a successful
+  password login is not proof. Denied or unproven transactions must not receive permission grants.
+  Never derive grants from `user_metadata`, requested scopes or client-supplied claims.
+- Set `{P}REQUIRE_PASSKEY=true` when every protected OIDC request must prove passkey authentication.
+  The Action must include literal `passkey` in the signed `https://nuvek.ca/amr` string or string
+  array. Missing, malformed or other methods are rejected before a principal is established;
+  standard `amr` alone does not satisfy this option. Refresh-token exchanges must preserve verified
+  passkey provenance or issue no grants; a missing method must fail closed.
+- Passkey policy and MFA policy are independent. A passkey is never converted into `mfa`.
+  `{P}REQUIRE_MFA` still checks permissioned OIDC routes only. Static machine tokens remain exempt
+  from both interactive requirements and work when Auth0 is unavailable.
 - Tokens must be RS256. Signing keys come from `{issuer}.well-known/jwks.json`, refreshed every 10 minutes;
   during an outage the last good key set is used for at most 24 hours.
 
@@ -72,7 +91,7 @@ user may hold 32 live tickets. Tickets travel in URLs, so don't log query string
 ## Vue
 
 ```json
-"dependencies": { "@nuvek/auth": "github:jean1880/nuvek-auth#v0.1.0" }
+"dependencies": { "@nuvek/auth": "github:jean1880/nuvek-auth#v0.2.0" }
 ```
 
 ```ts
@@ -86,7 +105,9 @@ app.use(createNuvekAuth(await loadAuthConfig()))
 `logout()`, `getToken()` and `hasPermission(p)`. `authFetch` attaches the bearer to same-origin requests
 only. `authWebSocketUrl` / `authEventSourceUrl` add a fresh ticket. `<RequireAuth>` is headless, with
 `default`, `loading` and `unauthenticated` (`{ login }`) slots. Permissions in the SPA are for display
-only; the server enforces them.
+only; the server enforces them. The Vue decoder follows the same namespaced-claim precedence,
+native fallback, deduplication and wildcard filtering as Rust. It grants nothing for malformed
+permission arrays.
 
 In `off` and `token` modes the plugin is a stub: always authenticated, no token, every permission
 granted. A browser can't sign in with the static machine token, so in `token` mode the SPA looks signed

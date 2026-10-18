@@ -107,13 +107,67 @@ describe('oidc client', () => {
     })
   })
 
-  it('decodes permissions from the permissions claim only, never scope', async () => {
+  it('keeps native permission support and never grants scope', async () => {
     const auth = await install(OIDC)
     expect(auth.isAuthenticated.value).toBe(true)
     expect(auth.permissions.value).toEqual(['deb:write'])
     expect(auth.hasPermission('read:x')).toBe(false)
     expect(auth.hasPermission('deb:write')).toBe(true)
     expect(auth.hasPermission('nope')).toBe(false)
+  })
+
+  it('shows namespaced permissions from the Free-plan Action without native RBAC', async () => {
+    mockClient.getTokenSilently.mockResolvedValueOnce(jwt({
+      'https://nuvek.ca/permissions': ['deb:write'],
+      'https://nuvek.ca/amr': ['passkey'],
+      scope: 'openid admin:everything',
+    }))
+    const auth = await install(OIDC)
+    expect(auth.permissions.value).toEqual(['deb:write'])
+    expect(auth.hasPermission('deb:write')).toBe(true)
+    expect(auth.hasPermission('admin:everything')).toBe(false)
+  })
+
+  it('uses the namespace over native RBAC and discards duplicate, wildcard and empty permissions', async () => {
+    mockClient.getTokenSilently.mockResolvedValueOnce(jwt({
+      permissions: ['read:status', 'deb:write', '*', ''],
+      'https://nuvek.ca/permissions': ['deb:write', 'read:history', 'deb:write', '*', ''],
+    }))
+    const auth = await install(OIDC)
+    expect(auth.permissions.value).toEqual(['deb:write', 'read:history'])
+    expect(auth.hasPermission('read:status')).toBe(false)
+    expect(auth.hasPermission('*')).toBe(false)
+    expect(auth.hasPermission('')).toBe(false)
+  })
+
+  it.each([null, 'deb:write', ['deb:write', true], {}])('hides permissions for malformed namespaced claim %j', async (claim) => {
+    mockClient.getTokenSilently.mockResolvedValueOnce(jwt({
+      permissions: ['deb:write'],
+      'https://nuvek.ca/permissions': claim,
+    }))
+    const auth = await install(OIDC)
+    expect(auth.permissions.value).toEqual([])
+  })
+
+  it('does not restore native write permission when the namespace is empty', async () => {
+    mockClient.getTokenSilently.mockResolvedValueOnce(jwt({
+      permissions: ['deb:write'],
+      'https://nuvek.ca/permissions': [],
+    }))
+    const auth = await install(OIDC)
+    expect(auth.permissions.value).toEqual([])
+    expect(auth.hasPermission('deb:write')).toBe(false)
+  })
+
+  it('does not promote scope-only or wildcard-only tokens to write permissions', async () => {
+    mockClient.getTokenSilently.mockResolvedValueOnce(jwt({
+      permissions: null,
+      'https://nuvek.ca/permissions': ['*', ''],
+      scope: 'deb:write',
+    }))
+    const auth = await install(OIDC)
+    expect(auth.permissions.value).toEqual([])
+    expect(auth.hasPermission('deb:write')).toBe(false)
   })
 
   it('handles the callback on install and cleans the URL', async () => {

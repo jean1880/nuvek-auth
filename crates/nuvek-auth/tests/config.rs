@@ -146,12 +146,24 @@ fn bad_bool_and_bad_origin_fail() {
     assert!(matches!(err, AuthConfigError::Invalid { ref key, .. } if key == "T_AUTH_READS"));
     let err = err_of(&with(oidc_token_env(), "REQUIRE_MFA", "2"));
     assert!(matches!(err, AuthConfigError::Invalid { ref key, .. } if key == "T_REQUIRE_MFA"));
+    let err = err_of(&with(oidc_token_env(), "REQUIRE_PASSKEY", "2"));
+    assert!(matches!(err, AuthConfigError::Invalid { ref key, .. } if key == "T_REQUIRE_PASSKEY"));
     let err = err_of(&with(
         oidc_token_env(),
         "PUBLIC_ORIGIN",
         "https://app.test.example/path",
     ));
     assert!(matches!(err, AuthConfigError::Invalid { ref key, .. } if key == "T_PUBLIC_ORIGIN"));
+}
+
+#[test]
+fn passkey_requirement_is_opt_in_and_independent_of_mfa() {
+    let default = config(&oidc_token_env()).expect("config");
+    assert!(!default.oidc().expect("oidc").require_passkey());
+    let enabled = config(&with(oidc_token_env(), "REQUIRE_PASSKEY", "true")).expect("config");
+    let oidc = enabled.oidc().expect("oidc");
+    assert!(oidc.require_passkey());
+    assert!(!oidc.require_mfa());
 }
 
 #[test]

@@ -31,16 +31,19 @@ function decodePayload(token: string): Record<string, unknown> {
 }
 
 /**
- * Permissions from the `permissions` claim only, matching the server. `scope` is ignored: with Auth0
- * RBAC off, any requested scope is granted. Display only.
+ * The namespaced permission claim is authoritative when present, matching the server. Native
+ * permissions are a fallback only when it is absent. `scope` is ignored. Display only.
  */
 export function permissionsFromToken(token: string): string[] {
   const p = decodePayload(token)
   const out = new Set<string>()
-  if (Array.isArray(p.permissions)) {
-    for (const v of p.permissions) if (typeof v === 'string') out.add(v)
-  }
-  return [...out]
+  const claim = Object.prototype.hasOwnProperty.call(p, 'https://nuvek.ca/permissions')
+    ? p['https://nuvek.ca/permissions']
+    : p.permissions
+  // The server rejects malformed permission arrays; keep the display empty as well.
+  if (!Array.isArray(claim) || claim.some((value) => typeof value !== 'string')) return []
+  for (const value of claim) if (value !== '*' && value !== '') out.add(value)
+  return [...out].sort()
 }
 
 function offContext(): AuthContext {

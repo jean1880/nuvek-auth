@@ -74,6 +74,230 @@ async fn scope_never_grants_permissions() {
 }
 
 #[tokio::test]
+async fn namespaced_permissions_work_alone_and_override_native_permissions() {
+    let (auth, _) = oidc_auth();
+    for (native, expected) in [
+        (json!(null), vec!["deb:write", "read:history"]),
+        (
+            json!(["deb:write", "read:status", "", "*"]),
+            vec!["deb:write", "read:history"],
+        ),
+    ] {
+        let token = mint(
+            &claims(json!({
+                "permissions": native,
+                "https://nuvek.ca/permissions": ["read:history", "deb:write", "deb:write", "*", ""],
+                "scope": "admin:everything"
+            })),
+            "k1",
+        );
+        let principal = auth.authenticate(&bearer_headers(&token)).await.unwrap();
+        assert_eq!(principal.permissions, expected);
+        assert!(!principal.has_permission("admin:everything"));
+        assert!(!principal.has_permission("anything-else"));
+    }
+}
+
+#[tokio::test]
+async fn malformed_namespaced_permissions_are_rejected() {
+    let (auth, _) = oidc_auth();
+    for permissions in [
+        json!(null),
+        json!("deb:write"),
+        json!(["deb:write", true]),
+        json!({}),
+    ] {
+        let token = mint(
+            &claims(json!({"https://nuvek.ca/permissions": permissions})),
+            "k1",
+        );
+        assert!(matches!(
+            auth.authenticate(&bearer_headers(&token)).await,
+            Err(AuthError::Unauthorized(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn empty_namespaced_permissions_never_fall_back_to_native_rbac() {
+    let (auth, _) = oidc_auth();
+    let token = mint(
+        &claims(json!({
+            "permissions": ["deb:write"],
+            "https://nuvek.ca/permissions": []
+        })),
+        "k1",
+    );
+    assert_eq!(
+        auth.authenticate(&bearer_headers(&token)).await,
+        Err(AuthError::Forbidden("missing required permission"))
+    );
+
+    let env = with(
+        without(oidc_token_env(), "REQUIRED_PERMISSION"),
+        "ALLOWED_SUBS",
+        "auth0|alice",
+    );
+    let auth = authenticator(&env, TestSource::ok(&["k1"]));
+    let principal = auth.authenticate(&bearer_headers(&token)).await.unwrap();
+    assert!(principal.permissions.is_empty());
+    let response = write_app(&auth)
+        .oneshot(request("POST", "/api/force", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn tampering_with_namespaced_authorisation_claims_invalidates_the_signature() {
+    let (auth, _) = oidc_auth();
+    let original = mint(&claims(json!({"permissions": []})), "k1");
+    let mut parts = original.split('.');
+    let header = parts.next().unwrap();
+    let _payload = parts.next().unwrap();
+    let signature = parts.next().unwrap();
+    let forged = claims(json!({
+        "permissions": [],
+        "https://nuvek.ca/permissions": ["deb:write"],
+        "https://nuvek.ca/amr": ["passkey"]
+    }));
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&forged).unwrap());
+    let token = format!("{header}.{payload}.{signature}");
+    assert_eq!(
+        auth.authenticate(&bearer_headers(&token)).await,
+        Err(AuthError::Unauthorized("access token signature invalid"))
+    );
+}
+
+#[tokio::test]
+async fn required_passkey_accepts_only_an_explicit_namespaced_method() {
+    let env = with(oidc_token_env(), "REQUIRE_PASSKEY", "true");
+    let auth = authenticator(&env, TestSource::ok(&["k1"]));
+    for method in [json!(["passkey"]), json!("passkey")] {
+        let token = mint(
+            &claims(json!({
+                "permissions": null,
+                "https://nuvek.ca/permissions": ["deb:write"],
+                "https://nuvek.ca/amr": method
+            })),
+            "k1",
+        );
+        let principal = auth.authenticate(&bearer_headers(&token)).await.unwrap();
+        assert!(principal.has_permission("deb:write"));
+        assert!(!principal.mfa, "passkey must never manufacture MFA");
+    }
+    let native_only = mint(&claims(json!({"https://nuvek.ca/amr": ["passkey"]})), "k1");
+    assert!(auth
+        .authenticate(&bearer_headers(&native_only))
+        .await
+        .unwrap()
+        .has_permission("deb:write"));
+}
+
+#[tokio::test]
+async fn passkey_requirement_also_protects_read_routes_and_rejects_missing_or_wrong_methods() {
+    let env = with(oidc_token_env(), "REQUIRE_PASSKEY", "true");
+    let auth = authenticator(&env, TestSource::ok(&["k1"]));
+    let app = Router::new()
+        .route("/api/status", axum::routing::get(|| async { "private" }))
+        .layer(auth.require_user());
+    for method in [
+        json!(null),
+        json!("pwd"),
+        json!(["pwd", "mfa"]),
+        json!(["Passkey"]),
+        json!(["*"]),
+        json!(["passkey", true]),
+        json!({"passkey": true}),
+        json!(true),
+    ] {
+        let token = mint(
+            &claims(json!({
+                "amr": ["passkey", "mfa"],
+                "https://nuvek.ca/amr": method,
+                "https://nuvek.ca/permissions": ["deb:write"]
+            })),
+            "k1",
+        );
+        assert_eq!(
+            auth.authenticate(&bearer_headers(&token)).await,
+            Err(AuthError::Forbidden("passkey authentication required"))
+        );
+        let response = app
+            .clone()
+            .oneshot(request("GET", "/api/status", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let token = mint(&claims(json!({})), "k1");
+    assert_eq!(
+        auth.authenticate(&bearer_headers(&token)).await,
+        Err(AuthError::Forbidden("passkey authentication required")),
+        "the claim must be present, even when native permissions are valid"
+    );
+}
+
+#[tokio::test]
+async fn passkey_does_not_turn_scope_or_wildcard_into_a_permission() {
+    let env = with(oidc_token_env(), "REQUIRE_PASSKEY", "true");
+    let auth = authenticator(&env, TestSource::ok(&["k1"]));
+    for permissions in [json!([]), json!(["*", ""])] {
+        let token = mint(
+            &claims(json!({
+                "permissions": [],
+                "https://nuvek.ca/permissions": permissions,
+                "https://nuvek.ca/amr": ["passkey"],
+                "scope": "openid deb:write"
+            })),
+            "k1",
+        );
+        assert_eq!(
+            auth.authenticate(&bearer_headers(&token)).await,
+            Err(AuthError::Forbidden("missing required permission"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn passkey_requirement_preserves_the_independent_mfa_permission_gate() {
+    let env = with(
+        with(oidc_token_env(), "REQUIRE_PASSKEY", "true"),
+        "REQUIRE_MFA",
+        "true",
+    );
+    let auth = authenticator(&env, TestSource::ok(&["k1"]));
+    for (methods, expected) in [
+        (json!(["passkey"]), StatusCode::FORBIDDEN),
+        (json!(["passkey", "mfa"]), StatusCode::OK),
+    ] {
+        let token = mint(&claims(json!({"https://nuvek.ca/amr": methods})), "k1");
+        let response = write_app(&auth)
+            .oneshot(request("POST", "/api/force", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[tokio::test]
+async fn static_token_is_exempt_from_passkey_and_mfa_without_contacting_auth0() {
+    let env = with(
+        with(oidc_token_env(), "REQUIRE_PASSKEY", "true"),
+        "REQUIRE_MFA",
+        "true",
+    );
+    let source = TestSource::down();
+    let auth = authenticator(&env, source.clone());
+    let response = write_app(&auth)
+        .oneshot(request("POST", "/api/force", Some(STATIC_TOKEN)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(source.count(), 0);
+}
+
+#[tokio::test]
 async fn future_nbf_is_401() {
     let (auth, _) = oidc_auth();
     let token = mint(&claims(json!({"nbf": now() + 3600})), "k1");

@@ -101,6 +101,7 @@ pub struct OidcConfig {
     allowed_subs: Vec<String>,
     required_permission: Option<String>,
     require_mfa: bool,
+    require_passkey: bool,
 }
 
 impl OidcConfig {
@@ -134,6 +135,13 @@ impl OidcConfig {
     /// ([`crate::Via::Oidc`]); the static machine token is exempt.
     pub fn require_mfa(&self) -> bool {
         self.require_mfa
+    }
+
+    /// Whether `{P}REQUIRE_PASSKEY` is on. Every OIDC token must then carry `passkey`
+    /// in the signed `https://nuvek.ca/amr` claim before a principal is established.
+    /// Static machine tokens are exempt; this does not satisfy or change MFA policy.
+    pub fn require_passkey(&self) -> bool {
+        self.require_passkey
     }
 
     /// The issuer host and optional port (e.g. `tenant.eu.auth0.com`), as the SPA SDK wants it.
@@ -254,6 +262,7 @@ impl AuthConfig {
 
         let auth_reads = parse_bool(&key("AUTH_READS"), get("AUTH_READS"), true)?;
         let require_mfa = parse_bool(&key("REQUIRE_MFA"), get("REQUIRE_MFA"), false)?;
+        let require_passkey = parse_bool(&key("REQUIRE_PASSKEY"), get("REQUIRE_PASSKEY"), false)?;
 
         let public_origin = match get("PUBLIC_ORIGIN") {
             Some(v) => Some(normalise_origin(&key("PUBLIC_ORIGIN"), &v)?),
@@ -294,6 +303,7 @@ impl AuthConfig {
                 allowed_subs,
                 required_permission,
                 require_mfa,
+                require_passkey,
             })
         } else {
             None
@@ -476,6 +486,7 @@ mod tests {
             allowed_subs: vec![],
             required_permission: Some("p".into()),
             require_mfa: false,
+            require_passkey: false,
         };
         assert_eq!(o.domain(), "t.example");
         assert_eq!(o.issuer_origin(), "https://t.example");

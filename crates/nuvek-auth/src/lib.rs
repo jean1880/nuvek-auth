@@ -241,7 +241,7 @@ impl Authenticator {
     /// - Otherwise, in the oidc modes, the bearer is validated as an RS256 access token.
     ///
     /// Errors: 401 for a missing or invalid credential, 403 for a disallowed subject or a missing
-    /// `{P}REQUIRED_PERMISSION`, 503 when the JWKS is unavailable.
+    /// `{P}REQUIRED_PERMISSION` or `{P}REQUIRE_PASSKEY` assurance, 503 when the JWKS is unavailable.
     pub async fn authenticate(&self, headers: &HeaderMap) -> Result<Principal, AuthError> {
         let config = &self.inner.config;
         if config.mode() == AuthMode::Off {
