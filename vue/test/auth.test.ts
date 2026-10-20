@@ -77,6 +77,8 @@ let storageSet: ReturnType<typeof vi.spyOn>[]
 
 beforeEach(() => {
   mockClient.ctorArgs.length = 0
+  mockClient.checkSession.mockClear()
+  mockClient.loginWithRedirect.mockClear()
   mockClient.getTokenSilently.mockImplementation(async () => jwt({ permissions: ['deb:write'], scope: 'openid read:x' }))
   mockClient.isAuthenticated.mockImplementation(async () => true)
   fetchMock = vi.fn(async () => new Response('{}', { status: 200 }))
@@ -94,14 +96,14 @@ afterEach(() => {
 })
 
 describe('oidc client', () => {
-  it('configures memory cache, refresh tokens without fallback, and audience/redirect', async () => {
+  it('configures memory cache, refresh tokens with iframe fallback, and audience/redirect', async () => {
     await install(OIDC)
     expect(mockClient.ctorArgs[0]).toMatchObject({
       domain: 'tenant.example.com',
       clientId: 'client123',
       cacheLocation: 'memory',
       useRefreshTokens: true,
-      useRefreshTokensFallback: false,
+      useRefreshTokensFallback: true,
       useCookiesForTransactions: true,
       authorizationParams: { audience: OIDC.audience, redirect_uri: location.origin + '/' },
     })
@@ -175,6 +177,23 @@ describe('oidc client', () => {
     await install(OIDC)
     expect(mockClient.handleRedirectCallback).toHaveBeenCalled()
     expect(location.pathname + location.search).toBe('/dashboard')
+  })
+
+  it('restores the session on a reload before reading the empty memory cache', async () => {
+    let restored = false
+    mockClient.checkSession.mockImplementationOnce(async () => {
+      restored = true
+    })
+    mockClient.isAuthenticated.mockImplementation(async () => restored)
+    const auth = await install(OIDC)
+    expect(mockClient.checkSession).toHaveBeenCalledTimes(1)
+    expect(auth.isAuthenticated.value).toBe(true)
+  })
+
+  it('does not run checkSession while handling the login callback', async () => {
+    history.replaceState(null, '', '/?code=abc&state=xyz')
+    await install(OIDC)
+    expect(mockClient.checkSession).not.toHaveBeenCalled()
   })
 
   it('refuses an unsafe returnTo from the callback', async () => {
@@ -373,8 +392,9 @@ describe('ticket URLs', () => {
 })
 
 describe('RequireAuth', () => {
-  async function render(cfg: Parameters<typeof createNuvekAuth>[0]) {
+  async function render(cfg: Parameters<typeof createNuvekAuth>[0], props: { autoLogin?: boolean } = {}) {
     const w = mount(RequireAuth, {
+      props,
       global: { plugins: [createNuvekAuth(cfg)] },
       slots: {
         default: '<span id="in">in</span>',
@@ -392,11 +412,33 @@ describe('RequireAuth', () => {
 
   it('shows loading, then unauthenticated with a working login', async () => {
     mockClient.isAuthenticated.mockImplementation(async () => false)
-    const w = await render(OIDC)
+    const w = await render(OIDC, { autoLogin: false })
     expect(w.find('#load').exists()).toBe(true)
     await vi.waitFor(() => expect(w.find('#out').exists()).toBe(true))
+    expect(mockClient.loginWithRedirect).not.toHaveBeenCalled()
     await w.find('#out').trigger('click')
     expect(mockClient.loginWithRedirect).toHaveBeenCalled()
+  })
+
+  it('redirects to sign-in automatically when signed out', async () => {
+    mockClient.isAuthenticated.mockImplementation(async () => false)
+    await render(OIDC)
+    await vi.waitFor(() => expect(mockClient.loginWithRedirect).toHaveBeenCalledTimes(1))
+  })
+
+  it('does not redirect when already signed in', async () => {
+    const w = await render(OIDC)
+    await vi.waitFor(() => expect(w.find('#in').exists()).toBe(true))
+    expect(mockClient.loginWithRedirect).not.toHaveBeenCalled()
+  })
+
+  it('does not loop back to Auth0 after a failed login callback', async () => {
+    mockClient.isAuthenticated.mockImplementation(async () => false)
+    mockClient.handleRedirectCallback.mockRejectedValueOnce(new Error('access_denied'))
+    history.replaceState(null, '', '/?error=access_denied&state=xyz')
+    const w = await render(OIDC)
+    await vi.waitFor(() => expect(w.find('#out').exists()).toBe(true))
+    expect(mockClient.loginWithRedirect).not.toHaveBeenCalled()
   })
 })
 

@@ -81,7 +81,10 @@ function auth0Context(cfg: AuthPublicConfig): AuthContext {
     clientId: cfg.client_id,
     cacheLocation: 'memory',
     useRefreshTokens: true,
-    useRefreshTokensFallback: false,
+    // A reload empties the memory cache and its refresh token; fall back to silent iframe auth
+    // against the Auth0 session. Third-party cookie blocking defeats this unless the issuer is a
+    // custom domain on the app's own site (e.g. auth.nuvek.ca).
+    useRefreshTokensFallback: true,
     // The login transaction (state/nonce/verifier) must survive the redirect; keep it in a
     // short-lived cookie rather than the SDK's default sessionStorage.
     useCookiesForTransactions: true,
@@ -133,6 +136,10 @@ function auth0Context(cfg: AuthPublicConfig): AuthContext {
       if ((params.has('code') || params.has('error')) && params.has('state')) {
         const { appState } = await client.handleRedirectCallback()
         history.replaceState(history.state, '', safeReturnTo(appState?.returnTo))
+      } else {
+        // Restore a prior session after a reload. A no-op unless the SDK's is-authenticated
+        // cookie exists, and it swallows login_required.
+        await client.checkSession()
       }
       await refreshState()
       if (isAuthenticated.value) await getToken()

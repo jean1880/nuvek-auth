@@ -1,6 +1,6 @@
 {
   "name": "@nuvek/auth",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Vue 3 Auth0 (Authorization Code + PKCE) client for nuvek SPAs, paired with the nuvek-auth Rust crate.",
   "license": "MIT",
   "repository": {

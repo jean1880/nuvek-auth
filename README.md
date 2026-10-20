@@ -117,8 +117,15 @@ in while the server answers 401 to anything gated. Use `off` for local developme
 set it explicitly. Any other mode value throws at install.
 
 Session behaviour:
-- Tokens live in memory, so a page reload ends signed out. With an active Auth0 session, `login()` is a
-  redirect round trip with no password prompt.
+- Tokens live in memory, so a page reload drops them. On load the client calls `checkSession()`, which
+  (when the hint cookie below is present) restores the session through silent iframe auth against the
+  Auth0 session (`useRefreshTokensFallback`). Browsers that block third-party cookies defeat this unless
+  the issuer is an Auth0 custom domain on the app's own site (for example `auth.nuvek.ca` for
+  `*.nuvek.ca`).
+- When silent restore fails, `<RequireAuth>` redirects to Auth0 at once (`autoLogin`, default on;
+  `:auto-login="false"` shows the `unauthenticated` slot instead). That top-level redirect carries
+  Auth0's first-party session cookie, so a live session comes straight back with no prompt. After a
+  failed login (`error` set) it shows the `unauthenticated` slot rather than looping.
 - auth0-spa-js keeps the login transaction (state, nonce, PKCE verifier) in a short-lived cookie
   (`useCookiesForTransactions`) and sets its own `auth0.is.authenticated` hint cookie. Neither holds a
   token.
