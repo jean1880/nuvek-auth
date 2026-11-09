@@ -18,5 +18,5 @@ watchEffect(() => {
 <template>
   <slot v-if="isLoading" name="loading" />
   <slot v-else-if="isAuthenticated" :login="signIn" />
-  <slot v-else name="unauthenticated" :login="signIn" />
+  <slot v-else name="unauthenticated" :login="signIn" :error="error" />
 </template>

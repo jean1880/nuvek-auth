@@ -106,7 +106,8 @@ app.use(createNuvekAuth(await loadAuthConfig()))
 `useAuth()` exposes `isLoading`, `isAuthenticated`, `user`, `error`, `permissions`, `login(returnTo?)`,
 `logout()`, `getToken()` and `hasPermission(p)`. `authFetch` attaches the bearer to same-origin requests
 only. `authWebSocketUrl` / `authEventSourceUrl` add a fresh ticket. `<RequireAuth>` is headless, with
-`default`, `loading` and `unauthenticated` (`{ login }`) slots. Permissions in the SPA are for display
+`default`, `loading` and `unauthenticated` (`{ login, error }`) slots. Render `error` in the
+`unauthenticated` slot, or a failed or timed-out sign-in looks like nothing happened. Permissions in the SPA are for display
 only; the server enforces them. The Vue decoder follows the same namespaced-claim precedence,
 native fallback, deduplication and wildcard filtering as Rust. It grants nothing for malformed
 permission arrays.
@@ -126,6 +127,14 @@ Session behaviour:
   `:auto-login="false"` shows the `unauthenticated` slot instead). That top-level redirect carries
   Auth0's first-party session cookie, so a live session comes straight back with no prompt. After a
   failed login (`error` set) it shows the `unauthenticated` slot rather than looping.
+- Install-time sign-in is bounded by `INIT_TIMEOUT_MS` (35 s, above the SDK's own worst case of
+  three 10 s token attempts). Some SDK waits have no timeout of their own (the token worker's reply,
+  a lock held by a call that never returns), so a stale session could otherwise leave the app on its
+  `loading` slot forever. On timeout `error` is a `SignInTimeoutError` naming the step that hung,
+  the local session hint is cleared so the next load starts clean, and the `unauthenticated` slot
+  shows. The abandoned call is ignored if it settles later. Silent iframe auth gives up after 10 s
+  (`authorizeTimeoutInSeconds`). The Auth0 session itself is untouched, so the next sign-in returns
+  without a prompt.
 - auth0-spa-js keeps the login transaction (state, nonce, PKCE verifier) in a short-lived cookie
   (`useCookiesForTransactions`) and sets its own `auth0.is.authenticated` hint cookie. Neither holds a
   token.

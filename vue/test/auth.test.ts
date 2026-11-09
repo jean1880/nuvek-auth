@@ -29,7 +29,9 @@ vi.mock('@auth0/auth0-spa-js', () => ({
 }))
 
 import {
+  INIT_TIMEOUT_MS,
   RequireAuth,
+  SignInTimeoutError,
   authEventSourceUrl,
   authFetch,
   authWebSocketUrl,
@@ -105,6 +107,7 @@ describe('oidc client', () => {
       useRefreshTokens: true,
       useRefreshTokensFallback: true,
       useCookiesForTransactions: true,
+      authorizeTimeoutInSeconds: 10,
       authorizationParams: { audience: OIDC.audience, redirect_uri: location.origin + '/' },
     })
   })
@@ -231,6 +234,127 @@ describe('oidc client', () => {
       expect(auth.permissions.value).toEqual([])
     },
   )
+})
+
+describe('sign-in timeout', () => {
+  const never = () => new Promise<never>(() => {})
+
+  /** Mount without waiting: the point is that init would otherwise never settle. */
+  function mountApp(): UseAuth {
+    let auth!: UseAuth
+    const app = createApp(
+      defineComponent({
+        setup() {
+          auth = useAuth()
+          return () => h('div')
+        },
+      }),
+    )
+    app.use(createNuvekAuth(OIDC))
+    app.mount(document.createElement('div'))
+    return auth
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mockClient.logout.mockClear()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('gives up on a session restore that never settles, clears the local session and stops loading', async () => {
+    mockClient.checkSession.mockImplementationOnce(never)
+    const auth = mountApp()
+    await vi.advanceTimersByTimeAsync(INIT_TIMEOUT_MS - 1)
+    expect(auth.isLoading.value).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(auth.isLoading.value).toBe(false)
+    expect(auth.isAuthenticated.value).toBe(false)
+    expect(auth.error.value).toBeInstanceOf(SignInTimeoutError)
+    expect(auth.error.value?.message).toBe('Sign-in timed out while restoring the session.')
+    expect(mockClient.logout).toHaveBeenCalledWith({ openUrl: false })
+  })
+
+  it('names the token step when the access-token request hangs', async () => {
+    mockClient.getTokenSilently.mockImplementationOnce(never)
+    const auth = mountApp()
+    await vi.advanceTimersByTimeAsync(INIT_TIMEOUT_MS)
+    expect(auth.isLoading.value).toBe(false)
+    expect(auth.error.value?.message).toBe('Sign-in timed out while fetching an access token.')
+    expect(auth.permissions.value).toEqual([])
+  })
+
+  it('strips the callback params when completing sign-in hangs', async () => {
+    mockClient.handleRedirectCallback.mockImplementationOnce(never)
+    history.replaceState(null, '', '/page?keep=1&code=abc&state=xyz')
+    const auth = mountApp()
+    await vi.advanceTimersByTimeAsync(INIT_TIMEOUT_MS)
+    expect(auth.error.value?.message).toBe('Sign-in timed out while completing sign-in.')
+    expect(location.pathname + location.search).toBe('/page?keep=1')
+  })
+
+  it('still stops loading when the cleanup itself hangs', async () => {
+    mockClient.checkSession.mockImplementationOnce(never)
+    mockClient.logout.mockImplementationOnce(never)
+    const auth = mountApp()
+    await vi.advanceTimersByTimeAsync(INIT_TIMEOUT_MS + 2_000)
+    expect(auth.isLoading.value).toBe(false)
+    expect(auth.error.value).toBeInstanceOf(SignInTimeoutError)
+  })
+
+  it('ignores a session restore that finishes after the timeout, and clears the hint it rewrote', async () => {
+    let finish!: () => void
+    mockClient.checkSession.mockImplementationOnce(() => new Promise<void>((r) => (finish = r)))
+    const auth = mountApp()
+    await vi.advanceTimersByTimeAsync(INIT_TIMEOUT_MS)
+    expect(auth.error.value).toBeInstanceOf(SignInTimeoutError)
+    expect(mockClient.logout).toHaveBeenCalledTimes(1)
+
+    finish()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(auth.isAuthenticated.value).toBe(false)
+    expect(auth.permissions.value).toEqual([])
+    expect(auth.error.value).toBeInstanceOf(SignInTimeoutError)
+    expect(mockClient.getTokenSilently).not.toHaveBeenCalled()
+    expect(mockClient.logout).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a session the app re-established before the abandoned restore settled', async () => {
+    let finish!: () => void
+    mockClient.checkSession.mockImplementationOnce(() => new Promise<void>((r) => (finish = r)))
+    const auth = mountApp()
+    await vi.advanceTimersByTimeAsync(INIT_TIMEOUT_MS)
+    expect(mockClient.logout).toHaveBeenCalledTimes(1)
+
+    expect(await auth.getToken()).not.toBeNull()
+    expect(auth.isAuthenticated.value).toBe(true)
+    finish()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(auth.isAuthenticated.value).toBe(true)
+    expect(mockClient.logout).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not replay the return path when a callback finishes after the timeout', async () => {
+    let finish!: (v: { appState: { returnTo: string } }) => void
+    mockClient.handleRedirectCallback.mockImplementationOnce(() => new Promise((r) => (finish = r)))
+    history.replaceState(null, '', '/page?code=abc&state=xyz')
+    mountApp()
+    await vi.advanceTimersByTimeAsync(INIT_TIMEOUT_MS)
+    expect(location.pathname + location.search).toBe('/page')
+
+    finish({ appState: { returnTo: '/elsewhere' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(location.pathname).toBe('/page')
+  })
+
+  it('does not fire once sign-in has finished', async () => {
+    const auth = mountApp()
+    await vi.advanceTimersByTimeAsync(INIT_TIMEOUT_MS * 2)
+    expect(auth.isAuthenticated.value).toBe(true)
+    expect(auth.error.value).toBeNull()
+    expect(mockClient.logout).not.toHaveBeenCalled()
+  })
 })
 
 describe('mode validation', () => {
@@ -430,6 +554,20 @@ describe('RequireAuth', () => {
     const w = await render(OIDC)
     await vi.waitFor(() => expect(w.find('#in').exists()).toBe(true))
     expect(mockClient.loginWithRedirect).not.toHaveBeenCalled()
+  })
+
+  it('hands the sign-in error to the unauthenticated slot', async () => {
+    mockClient.isAuthenticated.mockImplementation(async () => false)
+    mockClient.handleRedirectCallback.mockRejectedValueOnce(new Error('access_denied'))
+    history.replaceState(null, '', '/?error=access_denied&state=xyz')
+    const w = mount(RequireAuth, {
+      global: { plugins: [createNuvekAuth(OIDC)] },
+      slots: {
+        loading: '<span id="load">loading</span>',
+        unauthenticated: '<template #unauthenticated="{ error }"><p id="err">{{ error?.message }}</p></template>',
+      },
+    })
+    await vi.waitFor(() => expect(w.find('#err').text()).toBe('access_denied'))
   })
 
   it('does not loop back to Auth0 after a failed login callback', async () => {

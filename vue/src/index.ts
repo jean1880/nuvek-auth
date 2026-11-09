@@ -1,4 +1,4 @@
-export { createNuvekAuth, loadAuthConfig, permissionsFromToken } from './plugin'
+export { createNuvekAuth, loadAuthConfig, permissionsFromToken, SignInTimeoutError, INIT_TIMEOUT_MS } from './plugin'
 export { useAuth, safeReturnTo } from './useAuth'
 export type { AuthPublicConfig, NuvekAuthConfig, UseAuth } from './useAuth'
 export { authFetch } from './fetch'

@@ -62,6 +62,43 @@ function offContext(): AuthContext {
   }
 }
 
+/**
+ * Upper bound on install-time sign-in. Some SDK waits have no timeout of their own (the token
+ * worker's reply, a lock held by a call that never returns), so without this a stale session can
+ * leave the app on its loading state forever with nothing in the console.
+ */
+// Above the SDK's own worst case for a slow but healthy token exchange (3 attempts × 10 s fetch
+// timeout), so only a call that will never settle trips it.
+export const INIT_TIMEOUT_MS = 35_000
+/** Bound on the local-session cleanup that follows a timeout. */
+const CLEANUP_TIMEOUT_MS = 2_000
+/** Silent iframe auth gives up well inside INIT_TIMEOUT_MS (the SDK default is 60 s). */
+const AUTHORIZE_TIMEOUT_S = 10
+
+/** Install-time sign-in did not finish in time. `error` mirrors the SDK's error-code field. */
+export class SignInTimeoutError extends Error {
+  readonly error = 'init_timeout'
+  constructor(readonly step: string) {
+    super(`Sign-in timed out while ${step}.`)
+    this.name = 'SignInTimeoutError'
+  }
+}
+
+/**
+ * Rejects with SignInTimeoutError naming the step in progress when `ms` elapses first.
+ * `onTimeout` runs synchronously in the timer, before any awaiting code can observe the rejection.
+ */
+function withTimeout<T>(work: Promise<T>, ms: number, step: () => string, onTimeout?: () => void): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      onTimeout?.()
+      reject(new SignInTimeoutError(step()))
+    }, ms)
+  })
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer))
+}
+
 const TERMINAL_ERRORS = new Set([
   'login_required',
   'missing_refresh_token',
@@ -83,11 +120,12 @@ function auth0Context(cfg: AuthPublicConfig): AuthContext {
     useRefreshTokens: true,
     // A reload empties the memory cache and its refresh token; fall back to silent iframe auth
     // against the Auth0 session. Third-party cookie blocking defeats this unless the issuer is a
-    // custom domain on the app's own site (e.g. auth.nuvek.ca).
+    // custom domain on the app's own site (e.g. auth.example.com for app.example.com).
     useRefreshTokensFallback: true,
     // The login transaction (state/nonce/verifier) must survive the redirect; keep it in a
     // short-lived cookie rather than the SDK's default sessionStorage.
     useCookiesForTransactions: true,
+    authorizeTimeoutInSeconds: AUTHORIZE_TIMEOUT_S,
     authorizationParams: { audience: cfg.audience, redirect_uri: redirectUri },
   })
 
@@ -99,10 +137,18 @@ function auth0Context(cfg: AuthPublicConfig): AuthContext {
 
   const toError = (e: unknown) => (e instanceof Error ? e : new Error(String(e)))
 
-  async function refreshState(): Promise<void> {
-    isAuthenticated.value = await client.isAuthenticated()
-    user.value = isAuthenticated.value ? await client.getUser() : undefined
-    if (!isAuthenticated.value) setPermissions([])
+  /** Always true outside install-time sign-in; during it, false once the sign-in was abandoned. */
+  type Live = () => boolean
+  const always: Live = () => true
+
+  async function refreshState(live: Live = always): Promise<void> {
+    const authed = await client.isAuthenticated()
+    if (!live()) return
+    const next = authed ? await client.getUser() : undefined
+    if (!live()) return
+    isAuthenticated.value = authed
+    user.value = next
+    if (!authed) setPermissions([])
   }
 
   function setPermissions(next: string[]): void {
@@ -110,14 +156,16 @@ function auth0Context(cfg: AuthPublicConfig): AuthContext {
     if (cur.length !== next.length || cur.some((v, i) => v !== next[i])) permissions.value = next
   }
 
-  async function getToken(): Promise<string | null> {
+  async function tokenFor(live: Live): Promise<string | null> {
     try {
       const token = await client.getTokenSilently()
+      if (!live()) return null
       if (!token) throw new Error('no access token returned')
       setPermissions(permissionsFromToken(token))
       isAuthenticated.value = true
       return token
     } catch (e) {
+      if (!live()) return null
       error.value = toError(e)
       // Only terminal SDK errors end the session; transient failures keep state.
       const code = (e as { error?: unknown } | null)?.error
@@ -130,20 +178,67 @@ function auth0Context(cfg: AuthPublicConfig): AuthContext {
     }
   }
 
+  const getToken = () => tokenFor(always)
+
+  /** Clears the SDK's local session (memory cache + is-authenticated hint), bounded. */
+  const clearLocalSession = () =>
+    withTimeout(client.logout({ openUrl: false }), CLEANUP_TIMEOUT_MS, () => 'clearing the session').catch(() => {})
+
+  /**
+   * Install-time sign-in. After a timeout it keeps running in the background (nothing can cancel
+   * the SDK call it is stuck in), so every step re-checks `live()` and touches no state once the
+   * sign-in was abandoned. A late SDK success also rewrites the SDK's own session hint, so the
+   * abandoned run clears it again on its way out.
+   */
+  async function signIn(markStep: (step: string) => void, live: Live): Promise<void> {
+    // An abandoned run's late SDK success rewrote the session hint: clear it, unless the app has
+    // signed in again since (a later getToken()), whose session must survive.
+    const bail = () => {
+      if (!isAuthenticated.value) void clearLocalSession()
+    }
+    const params = new URLSearchParams(location.search)
+    if ((params.has('code') || params.has('error')) && params.has('state')) {
+      markStep('completing sign-in')
+      const { appState } = await client.handleRedirectCallback()
+      if (!live()) return bail()
+      history.replaceState(history.state, '', safeReturnTo(appState?.returnTo))
+    } else {
+      // Restore a prior session after a reload. A no-op unless the SDK's is-authenticated
+      // cookie exists, and it swallows login_required.
+      markStep('restoring the session')
+      await client.checkSession()
+      if (!live()) return bail()
+    }
+    markStep('reading the session')
+    await refreshState(live)
+    if (!live()) return bail()
+    if (isAuthenticated.value) {
+      markStep('fetching an access token')
+      await tokenFor(live)
+      if (!live()) return bail()
+    }
+  }
+
   async function init(): Promise<void> {
+    let step = 'starting'
+    let abandoned = false
+    const live: Live = () => !abandoned
     try {
-      const params = new URLSearchParams(location.search)
-      if ((params.has('code') || params.has('error')) && params.has('state')) {
-        const { appState } = await client.handleRedirectCallback()
-        history.replaceState(history.state, '', safeReturnTo(appState?.returnTo))
-      } else {
-        // Restore a prior session after a reload. A no-op unless the SDK's is-authenticated
-        // cookie exists, and it swallows login_required.
-        await client.checkSession()
-      }
-      await refreshState()
-      if (isAuthenticated.value) await getToken()
+      await withTimeout(
+        signIn((s) => (step = s), live),
+        INIT_TIMEOUT_MS,
+        () => step,
+        () => (abandoned = true),
+      )
     } catch (e) {
+      if (e instanceof SignInTimeoutError) {
+        // Treat the stuck session as gone: drop the local session marker so the next load starts
+        // clean, and leave the user on the sign-in screen with the error instead of a spinner.
+        isAuthenticated.value = false
+        user.value = undefined
+        setPermissions([])
+        await clearLocalSession()
+      }
       error.value = toError(e)
       // Drop the single-use callback params so a reload does not replay them.
       const url = new URL(location.href)
